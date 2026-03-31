@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// 🔥 Claude Conversation Exporter v2 — REWRITTEN
+// 🔥 Claude Conversation Exporter v2.1 — UPDATED
 // ═══════════════════════════════════════════════════════════════════════════
-// Based on actual Claude.ai DOM structure (December 2024)
+// Based on actual Claude.ai DOM structure (March 2026)
 // ═══════════════════════════════════════════════════════════════════════════
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -32,16 +32,149 @@ document.addEventListener('DOMContentLoaded', () => {
     const messages = [];
     
     // ═════════════════════════════════════════════════════════════
-    // SELECTORS (based on actual Claude.ai structure Dec 2024)
+    // Helper: Convert HTML inline elements to Markdown text
     // ═════════════════════════════════════════════════════════════
-    // User messages: [data-testid="user-message"]
-    // Claude responses: [data-is-streaming] contains .standard-markdown
+    const htmlToMarkdown = (node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        return node.textContent;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return '';
+      
+      const tag = node.tagName.toLowerCase();
+      let inner = Array.from(node.childNodes).map(htmlToMarkdown).join('');
+      
+      if (tag === 'strong' || tag === 'b') return `**${inner}**`;
+      if (tag === 'em' || tag === 'i') return `*${inner}*`;
+      if (tag === 'code') return `\`${inner}\``;
+      if (tag === 'a') {
+        const href = node.getAttribute('href') || '';
+        return `[${inner}](${href})`;
+      }
+      if (tag === 'br') return '\n';
+      
+      return inner;
+    };
+    
+    // ═════════════════════════════════════════════════════════════
+    // Helper: Extract structured markdown from a .standard-markdown div
+    // ═════════════════════════════════════════════════════════════
+    const extractMarkdownContent = (markdownEl) => {
+      let text = '';
+      const children = markdownEl.children;
+      
+      for (let i = 0; i < children.length; i++) {
+        const el = children[i];
+        const tag = el.tagName.toLowerCase();
+        
+        if (tag === 'h1') text += `# ${htmlToMarkdown(el).trim()}\n\n`;
+        else if (tag === 'h2') text += `## ${htmlToMarkdown(el).trim()}\n\n`;
+        else if (tag === 'h3') text += `### ${htmlToMarkdown(el).trim()}\n\n`;
+        else if (tag === 'h4') text += `#### ${htmlToMarkdown(el).trim()}\n\n`;
+        else if (tag === 'h5') text += `##### ${htmlToMarkdown(el).trim()}\n\n`;
+        else if (tag === 'h6') text += `###### ${htmlToMarkdown(el).trim()}\n\n`;
+        else if (tag === 'ul' || tag === 'ol') {
+          text += extractList(el, 0, tag === 'ol');
+          text += '\n';
+        }
+        else if (tag === 'pre') {
+          // Code blocks — try to get the language from a class
+          const codeEl = el.querySelector('code');
+          let lang = '';
+          if (codeEl) {
+            const langClass = Array.from(codeEl.classList).find(c => c.startsWith('language-'));
+            if (langClass) lang = langClass.replace('language-', '');
+          }
+          const codeText = (codeEl || el).innerText.trim();
+          text += `\`\`\`${lang}\n${codeText}\n\`\`\`\n\n`;
+        }
+        else if (tag === 'blockquote') {
+          const lines = htmlToMarkdown(el).trim().split('\n');
+          text += lines.map(l => `> ${l}`).join('\n') + '\n\n';
+        }
+        else if (tag === 'hr') text += '---\n\n';
+        else if (tag === 'table') {
+          text += extractTable(el) + '\n\n';
+        }
+        else if (tag === 'p') {
+          const content = htmlToMarkdown(el).trim();
+          if (content) text += `${content}\n\n`;
+        }
+        else {
+          // div or other container — might wrap another standard-markdown or content
+          const content = htmlToMarkdown(el).trim();
+          if (content) text += `${content}\n\n`;
+        }
+      }
+      
+      return text;
+    };
+    
+    // ═════════════════════════════════════════════════════════════
+    // Helper: Extract list items with nesting
+    // ═════════════════════════════════════════════════════════════
+    const extractList = (listEl, depth = 0, isOrdered = false) => {
+      let text = '';
+      const items = listEl.querySelectorAll(':scope > li');
+      items.forEach((li, idx) => {
+        const indent = '  '.repeat(depth);
+        const prefix = isOrdered ? `${idx + 1}. ` : '- ';
+        
+        // Get direct text content (not from nested lists)
+        let itemText = '';
+        li.childNodes.forEach(child => {
+          if (child.nodeType === Node.TEXT_NODE) {
+            itemText += child.textContent;
+          } else if (child.nodeType === Node.ELEMENT_NODE) {
+            const childTag = child.tagName.toLowerCase();
+            if (childTag !== 'ul' && childTag !== 'ol') {
+              itemText += htmlToMarkdown(child);
+            }
+          }
+        });
+        text += `${indent}${prefix}${itemText.trim()}\n`;
+        
+        // Handle nested lists
+        const nestedUl = li.querySelector(':scope > ul');
+        const nestedOl = li.querySelector(':scope > ol');
+        if (nestedUl) text += extractList(nestedUl, depth + 1, false);
+        if (nestedOl) text += extractList(nestedOl, depth + 1, true);
+      });
+      return text;
+    };
+    
+    // ═════════════════════════════════════════════════════════════
+    // Helper: Extract table to markdown
+    // ═════════════════════════════════════════════════════════════
+    const extractTable = (tableEl) => {
+      const rows = tableEl.querySelectorAll('tr');
+      if (rows.length === 0) return '';
+      
+      let text = '';
+      rows.forEach((row, rowIdx) => {
+        const cells = row.querySelectorAll('th, td');
+        const cellTexts = Array.from(cells).map(c => htmlToMarkdown(c).trim());
+        text += `| ${cellTexts.join(' | ')} |\n`;
+        
+        // Add header separator after first row
+        if (rowIdx === 0) {
+          text += `| ${cellTexts.map(() => '---').join(' | ')} |\n`;
+        }
+      });
+      return text;
+    };
+    
+    // ═════════════════════════════════════════════════════════════
+    // MAIN: Find chat container and extract messages
     // ═════════════════════════════════════════════════════════════
     
-    // Find the main chat container
-    const chatContainer = document.querySelector('.overflow-y-scroll');
+    // Try multiple selectors for the chat container
+    const chatContainer = 
+      document.querySelector('[data-autoscroll-container="true"]') ||
+      document.querySelector('.overflow-y-auto.overflow-x-hidden') ||
+      document.querySelector('.overflow-y-scroll');
+    
     if (!chatContainer) {
-      return { error: 'Could not find chat container', messages: [], title: '' };
+      return { error: 'Could not find chat container. Make sure you have a conversation open.', messages: [], title: '' };
     }
     
     // Find all render-count divs (each message turn)
@@ -51,11 +184,10 @@ document.addEventListener('DOMContentLoaded', () => {
       // Check if this is a user message
       const userMsg = turn.querySelector('[data-testid="user-message"]');
       if (userMsg) {
-        // Get all paragraph text from user message
         const paragraphs = userMsg.querySelectorAll('p');
         let text = '';
         if (paragraphs.length > 0) {
-          text = Array.from(paragraphs).map(p => p.innerText.trim()).join('\n\n');
+          text = Array.from(paragraphs).map(p => htmlToMarkdown(p).trim()).join('\n\n');
         } else {
           text = userMsg.innerText.trim();
         }
@@ -69,39 +201,19 @@ document.addEventListener('DOMContentLoaded', () => {
       // Check if this is a Claude response
       const claudeResponse = turn.querySelector('[data-is-streaming]');
       if (claudeResponse) {
-        const markdown = claudeResponse.querySelector('.standard-markdown');
-        if (markdown) {
-          // Extract structured content
-          let text = '';
-          const children = markdown.children;
-          
-          for (let i = 0; i < children.length; i++) {
-            const el = children[i];
-            const tag = el.tagName.toLowerCase();
-            const content = el.innerText.trim();
-            
-            if (!content) continue;
-            
-            if (tag === 'h1') text += `# ${content}\n\n`;
-            else if (tag === 'h2') text += `## ${content}\n\n`;
-            else if (tag === 'h3') text += `### ${content}\n\n`;
-            else if (tag === 'h4') text += `#### ${content}\n\n`;
-            else if (tag === 'ul' || tag === 'ol') {
-              const items = el.querySelectorAll('li');
-              items.forEach((li, idx) => {
-                const prefix = tag === 'ol' ? `${idx + 1}. ` : '- ';
-                text += `${prefix}${li.innerText.trim()}\n`;
-              });
-              text += '\n';
-            }
-            else if (tag === 'pre') text += `\`\`\`\n${content}\n\`\`\`\n\n`;
-            else if (tag === 'hr') text += '---\n\n';
-            else text += `${content}\n\n`;
+        // Collect ALL .standard-markdown sections (there can be multiple when artifacts/tool use splits the response)
+        const markdownSections = claudeResponse.querySelectorAll('.standard-markdown');
+        let text = '';
+        
+        markdownSections.forEach((section) => {
+          const sectionText = extractMarkdownContent(section);
+          if (sectionText.trim()) {
+            text += sectionText;
           }
-          
-          if (text.trim()) {
-            messages.push({ role: 'assistant', content: text.trim() });
-          }
+        });
+        
+        if (text.trim()) {
+          messages.push({ role: 'assistant', content: text.trim() });
         }
       }
     });
@@ -125,7 +237,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const extractConversation = async () => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     
-    if (!tab.url || !tab.url.includes('claude.ai')) {
+    if (!tab.url || (!tab.url.includes('claude.ai') && !tab.url.includes('claude.com'))) {
       throw new Error('Please open a Claude.ai conversation');
     }
     
@@ -199,10 +311,11 @@ document.addEventListener('DOMContentLoaded', () => {
   // Generate filename
   const generateFilename = (title, options) => {
     const sanitized = (title || 'claude-conversation')
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/[\/\\:*?"<>|]+/g, '')   // remove filesystem-unsafe chars
+      .replace(/\s+/g, '-')             // spaces → hyphens
+      .replace(/-{2,}/g, '-')           // collapse multiple hyphens
       .replace(/^-|-$/g, '')
-      .substring(0, 40);
+      .substring(0, 80);
     
     const ext = options.format;
     const date = new Date().toISOString().split('T')[0];

@@ -10,7 +10,8 @@
     "clipboardWrite"
   ],
   "host_permissions": [
-    "https://claude.ai/*"
+    "https://claude.ai/*",
+    "https://claude.com/*"
   ],
   "action": {
     "default_popup": "popup.html",
