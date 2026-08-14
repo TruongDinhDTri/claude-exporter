@@ -1,1 +1,5 @@
 node_modules/
+
+# Saved pages used as test fixtures. They contain real
+# conversation content, so they stay out of this public repo.
+template.html
