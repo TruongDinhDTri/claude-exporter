@@ -14,6 +14,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const getOptions = () => ({
     includeTimestamp: document.getElementById('includeTimestamp').checked,
     includeMetadata: document.getElementById('includeMetadata').checked,
+    autoScroll: document.getElementById('autoScroll').checked,
     format: getFormat()
   });
   
@@ -28,9 +29,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // ═══════════════════════════════════════════════════════════════════════════
   // EXTRACTION FUNCTION - Runs in the page context
   // ═══════════════════════════════════════════════════════════════════════════
-  const extractionScript = () => {
-    const messages = [];
-    
+  const extractionScript = async (autoScroll) => {
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
     // ═════════════════════════════════════════════════════════════
     // Helper: Convert HTML inline elements to Markdown text
     // ═════════════════════════════════════════════════════════════
@@ -164,24 +165,10 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     
     // ═════════════════════════════════════════════════════════════
-    // MAIN: Find chat container and extract messages
+    // Helper: Turn one message turn into {role, content} — or null
     // ═════════════════════════════════════════════════════════════
-    
-    // Try multiple selectors for the chat container
-    const chatContainer = 
-      document.querySelector('[data-autoscroll-container="true"]') ||
-      document.querySelector('.overflow-y-auto.overflow-x-hidden') ||
-      document.querySelector('.overflow-y-scroll');
-    
-    if (!chatContainer) {
-      return { error: 'Could not find chat container. Make sure you have a conversation open.', messages: [], title: '' };
-    }
-    
-    // Find all render-count divs (each message turn)
-    const messageTurns = chatContainer.querySelectorAll('[data-test-render-count]');
-    
-    messageTurns.forEach((turn) => {
-      // Check if this is a user message
+    const parseTurn = (turn) => {
+      // User message
       const userMsg = turn.querySelector('[data-testid="user-message"]');
       if (userMsg) {
         const paragraphs = userMsg.querySelectorAll('p');
@@ -191,33 +178,152 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
           text = userMsg.innerText.trim();
         }
-        
-        if (text) {
-          messages.push({ role: 'human', content: text });
-        }
-        return;
+        return text ? { role: 'human', content: text } : null;
       }
-      
-      // Check if this is a Claude response
+
+      // Claude response
       const claudeResponse = turn.querySelector('[data-is-streaming]');
       if (claudeResponse) {
         // Collect ALL .standard-markdown sections (there can be multiple when artifacts/tool use splits the response)
         const markdownSections = claudeResponse.querySelectorAll('.standard-markdown');
         let text = '';
-        
         markdownSections.forEach((section) => {
           const sectionText = extractMarkdownContent(section);
-          if (sectionText.trim()) {
-            text += sectionText;
-          }
+          if (sectionText.trim()) text += sectionText;
         });
-        
-        if (text.trim()) {
-          messages.push({ role: 'assistant', content: text.trim() });
+        return text.trim() ? { role: 'assistant', content: text.trim() } : null;
+      }
+
+      return null;
+    };
+
+    // ═════════════════════════════════════════════════════════════
+    // Find the element that actually scrolls the thread.
+    // The class names on claude.ai change between builds, so prefer the
+    // autoscroll container but fall back to walking up from a real
+    // message until an overflow container that can actually scroll.
+    // ═════════════════════════════════════════════════════════════
+    const findScroller = () => {
+      const marked = document.querySelector('[data-autoscroll-container="true"]');
+      if (marked && marked.scrollHeight > marked.clientHeight + 40) return marked;
+
+      const anchor = document.querySelector('[data-test-render-count]') ||
+                     document.querySelector('[data-testid="user-message"]');
+      let el = anchor ? anchor.parentElement : null;
+      while (el && el !== document.body) {
+        const oy = getComputedStyle(el).overflowY;
+        if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight + 40) return el;
+        el = el.parentElement;
+      }
+      return marked || document.scrollingElement || document.documentElement;
+    };
+
+    const isPageScroller = (el) =>
+      el === document.scrollingElement || el === document.documentElement || el === document.body;
+
+    const setScrollTop = (el, value) => {
+      if (isPageScroller(el)) window.scrollTo(0, value);
+      else el.scrollTop = value;
+    };
+
+    const countTurns = () => document.querySelectorAll('[data-test-render-count]').length;
+
+    // ═════════════════════════════════════════════════════════════
+    // Climb to the very first message.
+    //
+    // Claude fetches older turns over the network as you approach the
+    // top, so the stop condition has to be patient: only give up once
+    // height, turn count AND scroll position all sit still for several
+    // rounds. Bailing after ~1s just races the fetch and loses history.
+    // ═════════════════════════════════════════════════════════════
+    const scrollToTop = async (scroller) => {
+      let stable = 0, lastHeight = -1, lastCount = -1;
+
+      for (let i = 0; i < 150 && stable < 4; i++) {
+        setScrollTop(scroller, 0);
+        await sleep(500);
+
+        const height = scroller.scrollHeight;
+        const count = countTurns();
+        const atTop = (isPageScroller(scroller) ? window.scrollY : scroller.scrollTop) <= 2;
+
+        if (height === lastHeight && count === lastCount && atTop) {
+          stable++;
+        } else {
+          stable = 0;
+          lastHeight = height;
+          lastCount = count;
         }
       }
-    });
-    
+    };
+
+    // ═════════════════════════════════════════════════════════════
+    // Collect whatever is mounted right now into an ordered, de-duped
+    // store. Called repeatedly while scrolling, because Claude unmounts
+    // turns once they leave the viewport — reading the DOM a single
+    // time can only ever see one screenful of a long conversation.
+    // ═════════════════════════════════════════════════════════════
+    const seen = new Map();
+
+    const harvest = () => {
+      // Count repeats *within* a pass so two genuinely identical
+      // messages ("ok", "tiếp đi") don't collapse into one.
+      const pass = new Map();
+      document.querySelectorAll('[data-test-render-count]').forEach((turn) => {
+        const msg = parseTurn(turn);
+        if (!msg) return;
+        const base = `${msg.role}:${msg.content}`;
+        const n = (pass.get(base) || 0) + 1;
+        pass.set(base, n);
+        const key = `${base}#${n}`;
+        if (!seen.has(key)) seen.set(key, msg);
+      });
+    };
+
+    // ═════════════════════════════════════════════════════════════
+    // MAIN — go to the top, then sweep downward harvesting each screen.
+    // Sweeping downward keeps insertion order equal to conversation
+    // order, so no re-sorting is needed afterwards.
+    // ═════════════════════════════════════════════════════════════
+    const scroller = findScroller();
+    if (!scroller) {
+      return { error: 'Could not find chat container. Make sure you have a conversation open.', messages: [], title: '' };
+    }
+
+    let passes = 0;
+
+    if (autoScroll) {
+      const original = isPageScroller(scroller) ? window.scrollY : scroller.scrollTop;
+
+      await scrollToTop(scroller);
+
+      const step = Math.max(200, Math.floor(scroller.clientHeight * 0.7));
+      for (let i = 0; i < 3000; i++) {
+        harvest();
+        passes++;
+        const pos = isPageScroller(scroller) ? window.scrollY : scroller.scrollTop;
+        if (pos + scroller.clientHeight >= scroller.scrollHeight - 4) break;
+        setScrollTop(scroller, pos + step);
+        await sleep(240);
+      }
+
+      harvest();
+      setScrollTop(scroller, original);
+    } else {
+      harvest();
+      passes = 1;
+    }
+
+    const messages = Array.from(seen.values());
+
+    if (!messages.length) {
+      return {
+        error: 'No messages found. Open a Claude conversation and let it finish loading, then try again.',
+        messages: [],
+        title: ''
+      };
+    }
+
     // Get title
     let title = document.title || '';
     title = title.replace(/\s*-\s*Claude\s*$/i, '').replace(/^Claude\s*-?\s*/i, '').trim();
@@ -229,23 +335,35 @@ document.addEventListener('DOMContentLoaded', () => {
       title: title || 'Claude Conversation',
       url: window.location.href,
       messageCount: messages.length,
-      messages
+      messages,
+      // Printed to the page console so a short export can be diagnosed:
+      // 1 pass means the sweep never ran.
+      stats: {
+        passes,
+        scroller: isPageScroller(scroller)
+          ? 'page'
+          : `${scroller.tagName.toLowerCase()}.${(scroller.className || '').toString().split(/\s+/).slice(0, 2).join('.')}`,
+        scrollHeight: scroller.scrollHeight,
+        clientHeight: scroller.clientHeight,
+        mountedAtEnd: countTurns()
+      }
     };
   };
   
   // Execute extraction
-  const extractConversation = async () => {
+  const extractConversation = async (options) => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    
+
     if (!tab.url || (!tab.url.includes('claude.ai') && !tab.url.includes('claude.com'))) {
       throw new Error('Please open a Claude.ai conversation');
     }
-    
+
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: extractionScript
+      func: extractionScript,
+      args: [options.autoScroll]
     });
-    
+
     if (!results || !results[0] || !results[0].result) {
       throw new Error('Extraction failed - no results');
     }
@@ -259,7 +377,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (data.messages.length === 0) {
       throw new Error('No messages found. Make sure you have a conversation open.');
     }
-    
+
+    if (data.stats) console.log('Claude Exporter — scroll stats:', data.stats);
+
     return data;
   };
   
@@ -337,9 +457,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // Button handlers
   exportBtn.addEventListener('click', async () => {
     try {
-      showStatus('⏳ Extracting...');
-      const data = await extractConversation();
       const options = getOptions();
+      showStatus(options.autoScroll ? '⏳ Scrolling & extracting…' : '⏳ Extracting…');
+      const data = await extractConversation(options);
       const content = formatConversation(data, options);
       const filename = generateFilename(data.title, options);
       downloadFile(content, filename);
@@ -352,9 +472,9 @@ document.addEventListener('DOMContentLoaded', () => {
   
   copyBtn.addEventListener('click', async () => {
     try {
-      showStatus('⏳ Extracting...');
-      const data = await extractConversation();
       const options = getOptions();
+      showStatus(options.autoScroll ? '⏳ Scrolling & extracting…' : '⏳ Extracting…');
+      const data = await extractConversation(options);
       const content = formatConversation(data, options);
       await navigator.clipboard.writeText(content);
       showStatus(`✅ Copied ${data.messages.length} messages!`, 'success');
