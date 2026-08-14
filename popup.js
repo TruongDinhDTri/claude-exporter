@@ -263,12 +263,15 @@ document.addEventListener('DOMContentLoaded', () => {
     // turns once they leave the viewport — reading the DOM a single
     // time can only ever see one screenful of a long conversation.
     // ═════════════════════════════════════════════════════════════
-    const seen = new Map();
+    const seen = new Map();   // key → message
+    const order = [];         // keys, in conversation order
 
     const harvest = () => {
       // Count repeats *within* a pass so two genuinely identical
       // messages ("ok", "tiếp đi") don't collapse into one.
       const pass = new Map();
+      const keys = [];
+
       document.querySelectorAll('[data-test-render-count]').forEach((turn) => {
         const msg = parseTurn(turn);
         if (!msg) return;
@@ -276,8 +279,26 @@ document.addEventListener('DOMContentLoaded', () => {
         const n = (pass.get(base) || 0) + 1;
         pass.set(base, n);
         const key = `${base}#${n}`;
+        keys.push(key);
         if (!seen.has(key)) seen.set(key, msg);
       });
+
+      // Splice this screenful into the running order, using the turns we
+      // already know as anchors.
+      //
+      // "First seen" is NOT "comes first": a turn whose body has not
+      // rendered yet is skipped, and when it fills in a moment later it
+      // would otherwise be appended behind the turns that follow it — one
+      // real export had an answer sitting five messages past its place,
+      // which reads as the conversation repeating itself. The DOM order
+      // within a single pass is always right, so anchoring on the overlap
+      // between passes puts a late arrival back where it belongs.
+      let anchor = -1;
+      for (const key of keys) {
+        const at = order.indexOf(key);
+        if (at !== -1) { anchor = at; continue; }
+        order.splice(++anchor, 0, key);
+      }
     };
 
     // ═════════════════════════════════════════════════════════════
@@ -344,7 +365,7 @@ document.addEventListener('DOMContentLoaded', () => {
       passes = 1;
     }
 
-    const messages = Array.from(seen.values());
+    const messages = order.map((key) => seen.get(key));
 
     if (!messages.length) {
       return {
