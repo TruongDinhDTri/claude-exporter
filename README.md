@@ -61,10 +61,6 @@ Structured data with metadata.
 - Check that it's enabled in `chrome://extensions/`
 - Click the puzzle icon in Chrome and pin the extension
 
----
-
-Made with 💛 for Wiganz
-
 ## Running the tests
 
 ```
@@ -78,3 +74,7 @@ turns and discovers the rest a few at a time, with the fetch landing a beat
 after the scroll that asked for it. That lag is what made earlier builds
 truncate the ending or drop a stretch out of the middle, so the tests assert
 the full conversation comes back in order — not merely that some messages did.
+
+---
+
+Made with 💛 for Wiganz
