@@ -299,40 +299,45 @@ document.addEventListener('DOMContentLoaded', () => {
 
       await scrollToTop(scroller);
 
-      // Descend by "did the position actually advance?", NOT by comparing
-      // scrollTop + clientHeight against scrollHeight. Claude unmounts the
-      // turns above as you go and swaps in shorter placeholders, so
-      // scrollHeight *shrinks* mid-sweep — the arithmetic "at bottom" test
-      // fires early and drops the last screenful of messages.
+      // Descend one screen at a time, and never jump ahead.
+      //
+      // Two things must NOT drive the stop decision:
+      //
+      //   * `scrollTop + clientHeight >= scrollHeight` — claude.ai only
+      //     measures the turns it has mounted so far, so scrollHeight
+      //     describes discovered content, not the conversation. The test
+      //     fires while the ending is still being fetched.
+      //
+      //   * jumping to scrollHeight when the position stalls — that skips
+      //     whatever had not mounted yet, punching a hole in the middle of
+      //     the export. Two answers then sit side by side with the question
+      //     between them missing, which reads as duplicated text.
+      //
+      // A stalled position simply means the fetch has not landed. Keep
+      // asking for the same next screen and stop only once the page has
+      // gone completely quiet: neither the position nor the harvest has
+      // changed for several rounds running.
       const step = Math.max(200, Math.floor(scroller.clientHeight * 0.7));
-      let stuck = 0, lastPos = -1;
+      let quiet = 0, lastPos = -1, lastSize = 0;
 
-      for (let i = 0; i < 3000 && stuck < 3; i++) {
+      for (let i = 0; i < 4000 && quiet < 10; i++) {
         harvest();
         passes++;
+
+        const grew = seen.size > lastSize;
+        lastSize = seen.size;
 
         const pos = getPos();
-        if (pos <= lastPos + 2) stuck++; else stuck = 0;
+        const moved = pos > lastPos + 2;
         lastPos = pos;
 
+        if (!grew && !moved) quiet++; else quiet = 0;
+
         setScrollTop(scroller, pos + step);
-        await sleep(240);
+        await sleep(300);
       }
 
-      // The tail needs its own settle loop: the composer is sticky and the
-      // final turns mount late, so slam to the very bottom until the
-      // harvested count stops growing.
-      let tailStable = 0, lastSize = -1;
-      for (let i = 0; i < 15 && tailStable < 3; i++) {
-        setScrollTop(scroller, scroller.scrollHeight);
-        await sleep(400);
-        harvest();
-        passes++;
-
-        if (seen.size === lastSize) tailStable++; else tailStable = 0;
-        lastSize = seen.size;
-      }
-
+      harvest();
       setScrollTop(scroller, original);
     } else {
       harvest();

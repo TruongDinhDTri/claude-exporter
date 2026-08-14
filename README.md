@@ -64,3 +64,17 @@ Structured data with metadata.
 ---
 
 Made with 💛 for Wiganz
+
+## Running the tests
+
+```
+npm install
+npm test
+```
+
+The suite drives the real `extractionScript` from `popup.js` against a
+JSDOM thread that virtualizes like the live app: it mounts only the visible
+turns and discovers the rest a few at a time, with the fetch landing a beat
+after the scroll that asked for it. That lag is what made earlier builds
+truncate the ending or drop a stretch out of the middle, so the tests assert
+the full conversation comes back in order — not merely that some messages did.
