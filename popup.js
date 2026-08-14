@@ -292,22 +292,47 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let passes = 0;
 
+    const getPos = () => (isPageScroller(scroller) ? window.scrollY : scroller.scrollTop);
+
     if (autoScroll) {
-      const original = isPageScroller(scroller) ? window.scrollY : scroller.scrollTop;
+      const original = getPos();
 
       await scrollToTop(scroller);
 
+      // Descend by "did the position actually advance?", NOT by comparing
+      // scrollTop + clientHeight against scrollHeight. Claude unmounts the
+      // turns above as you go and swaps in shorter placeholders, so
+      // scrollHeight *shrinks* mid-sweep — the arithmetic "at bottom" test
+      // fires early and drops the last screenful of messages.
       const step = Math.max(200, Math.floor(scroller.clientHeight * 0.7));
-      for (let i = 0; i < 3000; i++) {
+      let stuck = 0, lastPos = -1;
+
+      for (let i = 0; i < 3000 && stuck < 3; i++) {
         harvest();
         passes++;
-        const pos = isPageScroller(scroller) ? window.scrollY : scroller.scrollTop;
-        if (pos + scroller.clientHeight >= scroller.scrollHeight - 4) break;
+
+        const pos = getPos();
+        if (pos <= lastPos + 2) stuck++; else stuck = 0;
+        lastPos = pos;
+
         setScrollTop(scroller, pos + step);
         await sleep(240);
       }
 
-      harvest();
+      // The tail needs its own settle loop: the composer is sticky and the
+      // final turns mount late, so slam to the very bottom until the
+      // harvested count stops growing.
+      let tailStable = 0, lastSize = -1;
+      for (let i = 0; i < 15 && tailStable < 3; i++) {
+        setScrollTop(scroller, scroller.scrollHeight);
+        await sleep(400);
+        harvest();
+        passes++;
+
+        if (seen.size === lastSize) tailStable++; else tailStable = 0;
+        lastSize = seen.size;
+      }
+
       setScrollTop(scroller, original);
     } else {
       harvest();
@@ -345,7 +370,8 @@ document.addEventListener('DOMContentLoaded', () => {
           : `${scroller.tagName.toLowerCase()}.${(scroller.className || '').toString().split(/\s+/).slice(0, 2).join('.')}`,
         scrollHeight: scroller.scrollHeight,
         clientHeight: scroller.clientHeight,
-        mountedAtEnd: countTurns()
+        mountedAtEnd: countTurns(),
+        harvested: messages.length
       }
     };
   };
